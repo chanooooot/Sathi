@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Tone Orb</title>
+<style>
+  :root{
+    --bg:#0b1116;          /* deep night */
+    --ink:#c9d4d2;         /* soft mist text */
+    --dim:#5c6b6e;
+    --accent:#e0b077;      /* warm ember (stable) */
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    background:var(--bg);
+    color:var(--ink);
+    font-family:Georgia,'Times New Roman',serif;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    text-align:center;overflow:hidden;
+    -webkit-tap-highlight-color:transparent;
+  }
+  #stage{position:fixed;inset:0;width:100%;height:100%}
+  .layer{
+    position:fixed;inset:0;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;gap:1.6rem;
+    padding:2rem;transition:opacity .8s ease;
+  }
+  .hidden{opacity:0;pointer-events:none}
+  h1{
+    font-weight:400;font-size:1.5rem;letter-spacing:.35em;
+    text-transform:uppercase;color:var(--ink);
+  }
+  p{max-width:26rem;line-height:1.7;color:var(--dim);font-size:1rem}
+  button{
+    font-family:inherit;font-size:.95rem;letter-spacing:.25em;text-transform:uppercase;
+    background:none;color:var(--ink);border:1px solid #2c3a3e;border-radius:999px;
+    padding:.85rem 2.4rem;cursor:pointer;transition:border-color .3s,color .3s;
+  }
+  button:hover,button:focus-visible{border-color:var(--accent);color:var(--accent);outline:none}
+  #endBtn{
+    position:fixed;bottom:max(2.2rem, env(safe-area-inset-bottom));left:50%;
+    transform:translateX(-50%);opacity:.55;
+  }
+  #endBtn:hover{opacity:1}
+  #calibrateText{font-size:1.15rem;letter-spacing:.15em;color:var(--ink)}
+  #duration{font-size:2rem;color:var(--accent);letter-spacing:.08em}
+  #micError{color:#c98a77}
+  @media (prefers-reduced-motion: reduce){ .layer{transition:none} }
+</style>
+</head>
+<body>
+
+<canvas id="stage"></canvas>
+
+<div class="layer" id="landing">
+  <h1>Tone Orb</h1>
+  <p>Hum one steady note. The orb settles as your voice — and mind — settle.
+     Nothing is scored. End whenever you like.</p>
+  <button id="beginBtn">Begin</button>
+  <p id="micError" class="hidden">This needs microphone access to work.
+     Please allow the microphone and try again.</p>
+</div>
+
+<div class="layer hidden" id="calibrate">
+  <p id="calibrateText">Take a breath…</p>
+</div>
+
+<div class="layer hidden" id="session" style="justify-content:flex-end">
+  <button id="endBtn">End session</button>
+</div>
+
+<div class="layer hidden" id="summary">
+  <p>You held tone for</p>
+  <div id="duration"></div>
+  <button id="againBtn">Again</button>
+</div>
+
+<script>
+'use strict';
+
+/* ---------- constants ---------- */
+const WINDOW_MS   = 2000;   // rolling stability window
+const CALIBRATE_MS= 3000;
+const PITCH_MIN   = 60, PITCH_MAX = 500;   // Hz, human hum range
+const RMS_FLOOR   = 0.012;  // below this = silence / resting
+const REDUCED = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+/* ---------- state ---------- */
+let audioCtx, analyser, buf;
+let samples = [];            // {t, pitch, rms}
+let mode = 'landing';        // landing | calibrate | session | summary
+let sessionStart = 0;
+let shownInstab = 0.5;       // smoothed value the orb renders (0 stable..1 unstable)
+let resting = true;
+
+/* ---------- ui ---------- */
+const $ = id => document.getElementById(id);
+const layers = ['landing','calibrate','session','summary'];
+function show(name){
+  mode = name;
+  layers.forEach(l => $(l).classList.toggle('hidden', l !== name));
+}
+
+$('beginBtn').addEventListener('click', start);
+$('endBtn').addEventListener('click', endSession);
+$('againBtn').addEventListener('click', () => show('landing'));
+
+async function start(){
+  $('micError').classList.add('hidden');
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia({audio:true});
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = audioCtx.createMediaStreamSource(stream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 2048;
+    buf = new Float32Array(analyser.fftSize);
+    src.connect(analyser);
+  }catch(e){
+    $('micError').classList.remove('hidden');
+    return;
+  }
+  show('calibrate');
+  setTimeout(() => {
+    samples = [];
+    sessionStart = performance.now();
+    show('session');
+  }, CALIBRATE_MS);
+}
+
+function endSession(){
+  const s = Math.round((performance.now() - sessionStart)/1000);
+  const m = Math.floor(s/60), r = s%60;
+  $('duration').textContent = m > 0 ? `${m}m ${r}s` : `${r}s`;
+  show('summary');
+}
+
+/* ---------- audio analysis ---------- */
+function rmsOf(b){
+  let s = 0;
+  for (let i=0;i<b.length;i++) s += b[i]*b[i];
+  return Math.sqrt(s/b.length);
+}
+
+/* autocorrelation pitch estimate; returns Hz or null */
+function pitchOf(b, sampleRate){
+  const size = b.length;
+  const maxLag = Math.floor(sampleRate/PITCH_MIN);
+  const minLag = Math.floor(sampleRate/PITCH_MAX);
+  let bestLag = -1, best = 0;
+  for (let lag=minLag; lag<=maxLag && lag<size; lag++){
+    let c = 0;
+    for (let i=0;i<size-lag;i++) c += b[i]*b[i+lag];
+    if (c > best){ best = c; bestLag = lag; }
+  }
+  if (bestLag < 0) return null;
+  let e = 0;
+  for (let i=0;i<size;i++) e += b[i]*b[i];
+  if (e === 0 || best/e < 0.5) return null;   // weak periodicity → not a hum
+  return sampleRate/bestLag;
+}
+
+function cv(arr){ // coefficient of variation
+  if (arr.length < 4) return 0;
+  const mean = arr.reduce((a,b)=>a+b,0)/arr.length;
+  if (mean === 0) return 0;
+  const varc = arr.reduce((a,b)=>a+(b-mean)**2,0)/arr.length;
+  return Math.sqrt(varc)/mean;
+}
+
+function measure(now){
+  analyser.getFloatTimeDomainData(buf);
+  const rms = rmsOf(buf);
+  resting = rms < RMS_FLOOR;
+  let targetInstab = 0.5;               // neutral (resting)
+  if (!resting){
+    const pitch = pitchOf(buf, audioCtx.sampleRate);
+    if (pitch) samples.push({t: now, pitch, rms});
+    while (samples.length && samples[0].t < now - WINDOW_MS) samples.shift();
+    if (samples.length >= 4){
+      const pCV = cv(samples.map(s=>s.pitch));
+      const vCV = cv(samples.map(s=>s.rms));
+      // pitch CV ~0.005 very steady, ~0.05 wobbly; volume CV ~0.05..0.5
+      targetInstab = Math.min(1, pCV*14 + vCV*1.6);
+    }
+  } else {
+    samples.length = 0;                 // fresh window after each breath
+  }
+  // visual smoothing: calm > accurate
+  shownInstab += (targetInstab - shownInstab) * 0.045;
+}
+
+/* ---------- orb rendering ---------- */
+const canvas = $('stage'), ctx = canvas.getContext('2d');
+function resize(){
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+  canvas.width  = innerWidth * dpr;
+  canvas.height = innerHeight * dpr;
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+}
+addEventListener('resize', resize); resize();
+
+/* layered-sine organic noise */
+function noise(a, t){
+  return Math.sin(a*3 + t*0.9) * 0.5
+       + Math.sin(a*7 - t*1.7) * 0.3
+       + Math.sin(a*13 + t*2.6) * 0.2;
+}
+
+function lerp(a,b,k){ return a + (b-a)*k; }
+
+function draw(now){
+  ctx.clearRect(0,0,innerWidth,innerHeight);
+  if (mode === 'session' || mode === 'calibrate'){
+    if (mode === 'session') measure(now);
+
+    const t = now/1000;
+    const cx = innerWidth/2, cy = innerHeight/2;
+    const base = Math.min(innerWidth, innerHeight) * 0.22;
+    const inst = mode === 'calibrate' ? 0.5 : shownInstab;
+    const stable = 1 - inst;
+    const dimmed = (mode === 'session' && resting) ? 0.45 : 1;
+
+    // color: cool slate (unstable) → warm ember (stable)
+    const hue = lerp(200, 36, stable);
+    const sat = lerp(14, 62, stable) * dimmed;
+    const lig = lerp(38, 58, stable) * dimmed;
+
+    // glow
+    const glow = ctx.createRadialGradient(cx,cy,base*0.3, cx,cy,base*2.4);
+    glow.addColorStop(0, `hsla(${hue},${sat}%,${lig}%,${0.22*dimmed})`);
+    glow.addColorStop(1, 'hsla(0,0%,0%,0)');
+    ctx.fillStyle = glow;
+    ctx.fillRect(0,0,innerWidth,innerHeight);
+
+    // orb body with jittery edge
+    const jitter = base * (0.02 + inst * 0.16);
+    const drift  = REDUCED ? 0 : Math.sin(t*0.5)*base*0.012; // ambient breath of the shape
+    ctx.beginPath();
+    const N = 140;
+    for (let i=0;i<=N;i++){
+      const a = (i/N) * Math.PI * 2;
+      const r = base + drift + noise(a, t) * jitter;
+      const x = cx + Math.cos(a)*r, y = cy + Math.sin(a)*r;
+      i === 0 ? ctx.moveTo(x,y) : ctx.lineTo(x,y);
+    }
+    ctx.closePath();
+    const fill = ctx.createRadialGradient(cx,cy,0, cx,cy,base*1.1);
+    fill.addColorStop(0, `hsla(${hue},${sat}%,${Math.min(lig+14,72)}%,${0.9*dimmed})`);
+    fill.addColorStop(1, `hsla(${hue},${sat}%,${lig*0.55}%,${0.85*dimmed})`);
+    ctx.fillStyle = fill;
+    ctx.fill();
+  }
+  requestAnimationFrame(draw);
+}
+requestAnimationFrame(draw);
+</script>
+</body>
+</html>
