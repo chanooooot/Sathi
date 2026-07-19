@@ -88,12 +88,14 @@ const RMS_FLOOR   = 0.012;  // below this = silence / resting
 const REDUCED = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 /* ---------- state ---------- */
-let audioCtx, analyser, buf;
+let audioCtx, analyser, buf, stream, wakeLock = null;
 let samples = [];            // {t, pitch, rms}
 let mode = 'landing';        // landing | calibrate | session | summary
 let sessionStart = 0;
 let shownInstab = 0.5;       // smoothed value the orb renders (0 stable..1 unstable)
+let targetInstab = 0.5;      // raw metric; shownInstab lags it
 let resting = true;
+let frame = 0;
 
 /* ---------- ui ---------- */
 const $ = id => document.getElementById(id);
@@ -101,7 +103,15 @@ const layers = ['landing','calibrate','session','summary'];
 function show(name){
   mode = name;
   layers.forEach(l => $(l).classList.toggle('hidden', l !== name));
+  if (name === 'landing' || name === 'summary') ctx.clearRect(0,0,innerWidth,innerHeight);
 }
+
+async function lockScreen(){
+  try{ wakeLock = await navigator.wakeLock.request('screen'); }catch(e){ /* unsupported / denied — fine */ }
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && (mode === 'session' || mode === 'calibrate')) lockScreen();
+});
 
 $('beginBtn').addEventListener('click', start);
 $('endBtn').addEventListener('click', endSession);
@@ -110,7 +120,7 @@ $('againBtn').addEventListener('click', () => show('landing'));
 async function start(){
   $('micError').classList.add('hidden');
   try{
-    const stream = await navigator.mediaDevices.getUserMedia({audio:true});
+    stream = await navigator.mediaDevices.getUserMedia({audio:true});
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     const src = audioCtx.createMediaStreamSource(stream);
     analyser = audioCtx.createAnalyser();
@@ -121,7 +131,10 @@ async function start(){
     $('micError').classList.remove('hidden');
     return;
   }
+  shownInstab = 0.5;
+  targetInstab = 0.5;
   show('calibrate');
+  lockScreen();
   setTimeout(() => {
     samples = [];
     sessionStart = performance.now();
@@ -130,6 +143,9 @@ async function start(){
 }
 
 function endSession(){
+  stream.getTracks().forEach(t => t.stop());
+  audioCtx.close();
+  if (wakeLock){ wakeLock.release(); wakeLock = null; }
   const s = Math.round((performance.now() - sessionStart)/1000);
   const m = Math.floor(s/60), r = s%60;
   $('duration').textContent = m > 0 ? `${m}m ${r}s` : `${r}s`;
@@ -173,7 +189,7 @@ function measure(now){
   analyser.getFloatTimeDomainData(buf);
   const rms = rmsOf(buf);
   resting = rms < RMS_FLOOR;
-  let targetInstab = 0.5;               // neutral (resting)
+  targetInstab = 0.5;                   // neutral (resting)
   if (!resting){
     const pitch = pitchOf(buf, audioCtx.sampleRate);
     if (pitch) samples.push({t: now, pitch, rms});
@@ -187,8 +203,6 @@ function measure(now){
   } else {
     samples.length = 0;                 // fresh window after each breath
   }
-  // visual smoothing: calm > accurate
-  shownInstab += (targetInstab - shownInstab) * 0.045;
 }
 
 /* ---------- orb rendering ---------- */
@@ -211,9 +225,14 @@ function noise(a, t){
 function lerp(a,b,k){ return a + (b-a)*k; }
 
 function draw(now){
-  ctx.clearRect(0,0,innerWidth,innerHeight);
   if (mode === 'session' || mode === 'calibrate'){
-    if (mode === 'session') measure(now);
+    ctx.clearRect(0,0,innerWidth,innerHeight);
+    if (mode === 'session'){
+      // ponytail: autocorrelation is ~1.5M mults; every 3rd frame is plenty for a 2s window
+      if (++frame % 3 === 0) measure(now);
+      // visual smoothing every frame: calm > accurate
+      shownInstab += (targetInstab - shownInstab) * 0.045;
+    }
 
     const t = now/1000;
     const cx = innerWidth/2, cy = innerHeight/2;
