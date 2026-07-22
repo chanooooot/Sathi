@@ -35,7 +35,7 @@ making any code change.
      rolling window: `instability = min(1, pitchCV*14 + rmsCV*1.6)`
    - Orb: Canvas 2D circle, edge jitter ∝ instability; color lerps
      cool slate (unstable) → warm ember (stable)
-   - Silence (RMS < 0.012) → orb rests dim/neutral. Never penalized.
+   - Silence (RMS < 0.006) → orb rests dim/neutral. Never penalized.
 5. **End session** → summary shows duration only → **Again**
 
 ## Non-negotiable constraints
@@ -66,7 +66,7 @@ If a request conflicts with these, stop and flag it — don't silently comply.
 | Constant | Purpose | Current |
 |----------|---------|---------|
 | `WINDOW_MS` | stability window | 2000 |
-| `RMS_FLOOR` | silence threshold | 0.012 |
+| `RMS_FLOOR` | silence threshold | 0.006 |
 | `pCV*14 + vCV*1.6` | instability weights | in `measure()` |
 | smoothing `0.045` | orb calmness | in `draw()` |
 

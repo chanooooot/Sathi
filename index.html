@@ -25,14 +25,14 @@
   .layer{
     position:fixed;inset:0;display:flex;flex-direction:column;
     align-items:center;justify-content:center;gap:1.6rem;
-    padding:2rem;transition:opacity .8s ease;
+    padding:2rem;transition:opacity .8s ease,visibility .8s ease;
   }
-  .hidden{opacity:0;pointer-events:none}
+  .hidden{opacity:0;visibility:hidden;pointer-events:none}
   h1{
     font-weight:400;font-size:1.5rem;letter-spacing:.35em;
-    text-transform:uppercase;color:var(--ink);
+    text-transform:uppercase;color:var(--ink);text-shadow:0 1px 14px var(--bg),0 0 3px var(--bg);
   }
-  p{max-width:26rem;line-height:1.7;color:var(--dim);font-size:1rem}
+  p{max-width:26rem;line-height:1.7;color:var(--dim);font-size:1rem;text-shadow:0 1px 14px var(--bg),0 0 3px var(--bg)}
   button{
     font-family:inherit;font-size:.95rem;letter-spacing:.25em;text-transform:uppercase;
     background:none;color:var(--ink);border:1px solid #2c3a3e;border-radius:999px;
@@ -64,7 +64,7 @@
 </div>
 
 <div class="layer hidden" id="calibrate">
-  <p id="calibrateText">Take a breath…</p>
+  <p id="calibrateText" aria-live="polite">Take a breath…</p>
 </div>
 
 <div class="layer hidden" id="session" style="justify-content:flex-end">
@@ -73,7 +73,8 @@
 
 <div class="layer hidden" id="summary">
   <p>You held tone for</p>
-  <div id="duration"></div>
+  <div id="duration" aria-live="polite"></div>
+  <p>Rest here as long as you like.</p>
   <button id="againBtn">Again</button>
 </div>
 
@@ -103,7 +104,6 @@ const layers = ['landing','calibrate','session','summary'];
 function show(name){
   mode = name;
   layers.forEach(l => $(l).classList.toggle('hidden', l !== name));
-  if (name === 'landing' || name === 'summary') ctx.clearRect(0,0,innerWidth,innerHeight);
 }
 
 async function lockScreen(){
@@ -133,8 +133,10 @@ async function start(){
   }
   shownInstab = 0.5;
   targetInstab = 0.5;
+  $('calibrateText').textContent = 'Take a breath…';
   show('calibrate');
   lockScreen();
+  setTimeout(() => { $('calibrateText').textContent = 'Settle in…'; }, CALIBRATE_MS * 0.55);
   setTimeout(() => {
     samples = [];
     sessionStart = performance.now();
@@ -223,54 +225,66 @@ function noise(a, t){
 }
 
 function lerp(a,b,k){ return a + (b-a)*k; }
+function smoothstep(x){ return x*x*(3-2*x); }
 
 function draw(now){
-  if (mode === 'session' || mode === 'calibrate'){
-    ctx.clearRect(0,0,innerWidth,innerHeight);
-    if (mode === 'session'){
-      // ponytail: autocorrelation is ~1.5M mults; every 3rd frame is plenty for a 2s window
-      if (++frame % 3 === 0) measure(now);
-      // visual smoothing every frame: calm > accurate
-      shownInstab += (targetInstab - shownInstab) * 0.045;
-    }
-
-    const t = now/1000;
-    const cx = innerWidth/2, cy = innerHeight/2;
-    const base = Math.min(innerWidth, innerHeight) * 0.22;
-    const inst = mode === 'calibrate' ? 0.5 : shownInstab;
-    const stable = 1 - inst;
-    const dimmed = (mode === 'session' && resting) ? 0.45 : 1;
-
-    // color: cool slate (unstable) → warm ember (stable)
-    const hue = lerp(200, 36, stable);
-    const sat = lerp(14, 62, stable) * dimmed;
-    const lig = lerp(38, 58, stable) * dimmed;
-
-    // glow
-    const glow = ctx.createRadialGradient(cx,cy,base*0.3, cx,cy,base*2.4);
-    glow.addColorStop(0, `hsla(${hue},${sat}%,${lig}%,${0.22*dimmed})`);
-    glow.addColorStop(1, 'hsla(0,0%,0%,0)');
-    ctx.fillStyle = glow;
-    ctx.fillRect(0,0,innerWidth,innerHeight);
-
-    // orb body with jittery edge
-    const jitter = base * (0.02 + inst * 0.16);
-    const drift  = REDUCED ? 0 : Math.sin(t*0.5)*base*0.012; // ambient breath of the shape
-    ctx.beginPath();
-    const N = 140;
-    for (let i=0;i<=N;i++){
-      const a = (i/N) * Math.PI * 2;
-      const r = base + drift + noise(a, t) * jitter;
-      const x = cx + Math.cos(a)*r, y = cy + Math.sin(a)*r;
-      i === 0 ? ctx.moveTo(x,y) : ctx.lineTo(x,y);
-    }
-    ctx.closePath();
-    const fill = ctx.createRadialGradient(cx,cy,0, cx,cy,base*1.1);
-    fill.addColorStop(0, `hsla(${hue},${sat}%,${Math.min(lig+14,72)}%,${0.9*dimmed})`);
-    fill.addColorStop(1, `hsla(${hue},${sat}%,${lig*0.55}%,${0.85*dimmed})`);
-    ctx.fillStyle = fill;
-    ctx.fill();
+  const backdrop = (mode === 'landing' || mode === 'summary');
+  ctx.clearRect(0,0,innerWidth,innerHeight);
+  if (mode === 'session'){
+    // ponytail: autocorrelation is ~1.5M mults; every 3rd frame is plenty for a 2s window
+    if (++frame % 3 === 0) measure(now);
+    // visual smoothing every frame: calm > accurate
+    shownInstab += (targetInstab - shownInstab) * 0.045;
   }
+
+  const t = now/1000;
+  const cx = innerWidth/2, cy = innerHeight/2;
+  const base = Math.min(innerWidth, innerHeight) * 0.22;
+  const inst = mode === 'calibrate' ? 0.5 : (backdrop ? 0.35 : shownInstab);
+  const stable = smoothstep(1 - inst);   // eased curve: mid-stability reads warm sooner
+  const dimmed = (mode === 'session' && resting) ? 0.45 : 1;
+  const backdropMul = backdrop ? 0.4 : 1;   // keep landing/summary text legible over the orb
+
+  // color: cool slate (unstable) → warm ember (stable)
+  const hue = lerp(200, 36, stable);
+  const sat = lerp(14, 62, stable) * dimmed;
+  const lig = lerp(38, 58, stable) * dimmed;
+
+  // ambient glow breathing (opacity only — no size pulsing, per D11)
+  const breathe = REDUCED ? 1 : (0.9 + 0.1*Math.sin(t*0.25));
+
+  // glow
+  const glow = ctx.createRadialGradient(cx,cy,base*0.3, cx,cy,base*2.4);
+  glow.addColorStop(0, `hsla(${hue},${sat}%,${lig}%,${0.22*dimmed*backdropMul*breathe})`);
+  glow.addColorStop(1, 'hsla(0,0%,0%,0)');
+  ctx.fillStyle = glow;
+  ctx.fillRect(0,0,innerWidth,innerHeight);
+
+  // orb body with jittery edge
+  const jitter = base * (0.02 + inst * 0.16);
+  const drift  = REDUCED ? 0 : Math.sin(t*0.5)*base*0.012; // ambient breath of the shape
+  ctx.beginPath();
+  const N = 140;
+  for (let i=0;i<=N;i++){
+    const a = (i/N) * Math.PI * 2;
+    const r = base + drift + noise(a, t) * jitter;
+    const x = cx + Math.cos(a)*r, y = cy + Math.sin(a)*r;
+    i === 0 ? ctx.moveTo(x,y) : ctx.lineTo(x,y);
+  }
+  ctx.closePath();
+  const fill = ctx.createRadialGradient(cx,cy,0, cx,cy,base*1.1);
+  fill.addColorStop(0, `hsla(${hue},${sat}%,${Math.min(lig+14,72)}%,${0.9*dimmed*backdropMul})`);
+  fill.addColorStop(1, `hsla(${hue},${sat}%,${lig*0.55}%,${0.85*dimmed*backdropMul})`);
+  ctx.fillStyle = fill;
+  ctx.fill();
+
+  // inner highlight: subtle warm core that grows with stability, no score implied
+  const hi = ctx.createRadialGradient(cx-base*0.15,cy-base*0.15,0, cx,cy,base*0.9);
+  hi.addColorStop(0, `hsla(${hue},${Math.min(sat+10,80)}%,${Math.min(lig+22,85)}%,${0.18*stable*dimmed*backdropMul})`);
+  hi.addColorStop(1, 'hsla(0,0%,0%,0)');
+  ctx.fillStyle = hi;
+  ctx.fill();
+
   requestAnimationFrame(draw);
 }
 requestAnimationFrame(draw);
